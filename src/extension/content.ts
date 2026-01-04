@@ -211,7 +211,14 @@ const playBufferedAudio = async () => {
 };
 
 // --- MAIN LOOP ---
-setInterval(() => {
+const mainLoop = setInterval(() => {
+    // Safety Check: Extension Reloaded?
+    if (!chrome.runtime?.id) {
+        console.log("[Hori-s.FM] Extension context invalidated. Stopping script. Please refresh the page.");
+        clearInterval(mainLoop);
+        return;
+    }
+
     const video = getMoviePlayer();
     if (!video || video.paused || !video.duration) return;
 
@@ -252,42 +259,62 @@ setInterval(() => {
             return;
         }
 
-        chrome.storage.local.get(['horisFmSettings'], (result) => {
-            const settings = (result as any).horisFmSettings || { enabled: true, voice: 'Kore' };
-
-            if (!settings.enabled) {
-                console.log("[Generator] Aborting: System Disabled");
-                state.status = 'COOLDOWN';
-                return;
-            }
-
-            chrome.runtime.sendMessage({
-                type: 'GENERATE_INTRO',
-                data: {
-                    currentSong: { title: current.title, artist: current.artist, id: 'ytm-current' },
-                    nextSong: { title: next.title || "Next Track", artist: next.artist || "Unknown", id: 'ytm-next' },
-                    playlistContext: (current as any).playlistContext || [], // Pass the context
-                    style: settings.style || 'STANDARD',
-                    voice: settings.voice,
-                    language: 'en'
+        try {
+            chrome.storage.local.get(['horisFmSettings'], (result) => {
+                if (chrome.runtime.lastError) {
+                    console.error("[Generator] Storage access failed:", chrome.runtime.lastError);
+                    return;
                 }
-            }, (response) => {
-                console.log("[Generator] Background Response Received.");
+                const settings = (result as any).horisFmSettings || { enabled: true, voice: 'Kore' };
 
-                if (state.currentSongSig !== sig) {
-                    console.warn("[Generator] Discarding response: Song changed during generation.");
+                if (!settings.enabled) {
+                    console.log("[Generator] Aborting: System Disabled");
+                    state.status = 'COOLDOWN';
                     return;
                 }
 
-                if (response && response.audio) {
-                    console.log("[Generator] Audio received & Buffered.");
-                    state.bufferedAudio = response.audio;
-                    state.status = 'READY';
-                } else {
-                    state.status = 'COOLDOWN';
+                try {
+                    chrome.runtime.sendMessage({
+                        type: 'GENERATE_INTRO',
+                        data: {
+                            currentSong: { title: current.title, artist: current.artist, id: 'ytm-current' },
+                            nextSong: { title: next.title || "Next Track", artist: next.artist || "Unknown", id: 'ytm-next' },
+                            playlistContext: (current as any).playlistContext || [],
+                            style: settings.style || 'STANDARD',
+                            voice: settings.voice,
+                            language: 'en'
+                        }
+                    }, (response) => {
+                        if (chrome.runtime.lastError) {
+                            // This often catches "Could not establish connection" if bg is dead
+                            console.warn("[Generator] Communication error:", chrome.runtime.lastError);
+                            return;
+                        }
+
+                        console.log("[Generator] Background Response Received.");
+
+                        if (state.currentSongSig !== sig) {
+                            console.warn("[Generator] Discarding response: Song changed during generation.");
+                            return;
+                        }
+
+                        if (response && response.audio) {
+                            console.log("[Generator] Audio received & Buffered.");
+                            state.bufferedAudio = response.audio;
+                            state.status = 'READY';
+                        } else {
+                            state.status = 'COOLDOWN';
+                        }
+                    });
+                } catch (e) {
+                    console.error("[Generator] Failed to send message:", e);
                 }
             });
-        });
+        } catch (e) {
+            // This catches the immediate "context invalidated" if accessing chrome.storage throws
+            console.log("[Hori-s.FM] Extension context invalidated during storage access. Stopping.");
+            clearInterval(mainLoop);
+        }
     }
 
     if (state.status === 'READY' && timeLeft < 12) {
